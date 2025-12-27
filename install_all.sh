@@ -9,10 +9,10 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "🚀 Installing SNMP Alarm System (FINAL FIX + PORT PROMPT)"
+echo "🚀 Installing SNMP Alarm System (FULL FINAL FIX)"
 
 #######################################
-# INTERACTIVE DB CONFIG
+# INTERACTIVE INPUT
 #######################################
 read -rp "Enter PostgreSQL database name [snmptraps]: " DB_NAME
 DB_NAME=${DB_NAME:-snmptraps}
@@ -30,9 +30,6 @@ if [[ "$DB_PASS" != "$DB_PASS_CONFIRM" ]]; then
   exit 1
 fi
 
-#######################################
-# SNMP CONFIG
-#######################################
 read -rp "Enter SNMP listening port [162]: " SNMP_PORT
 SNMP_PORT=${SNMP_PORT:-162}
 
@@ -50,13 +47,13 @@ SERVICE_NAME="snmp-trap-receiver"
 BASE_URL="https://raw.githubusercontent.com/mizan23/snmp_huawei_NTTN/main"
 
 #######################################
-# OS DEPENDENCIES
+# OS PACKAGES
 #######################################
 apt update
 apt install -y \
   curl \
   postgresql postgresql-contrib \
-  python3 python3-venv python3-pip \
+  python3 python3-pip python3-venv \
   software-properties-common
 
 #######################################
@@ -69,22 +66,21 @@ if ! command -v python3.11 >/dev/null 2>&1; then
 fi
 
 #######################################
-# POSTGRESQL SERVICE
+# POSTGRESQL
 #######################################
 systemctl enable postgresql
 systemctl start postgresql
 
 #######################################
-# CREATE DATABASE
+# DATABASE CREATION
 #######################################
 if ! sudo -u postgres psql -d postgres -tAc \
   "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
-  echo "🗄️ Creating database ${DB_NAME}"
   sudo -u postgres psql -d postgres -c "CREATE DATABASE ${DB_NAME};"
 fi
 
 #######################################
-# CREATE USER
+# USER CREATION
 #######################################
 if ! sudo -u postgres psql -d postgres -tAc \
   "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
@@ -96,7 +92,7 @@ sudo -u postgres psql -d postgres -c \
   "ALTER DATABASE ${DB_NAME} OWNER TO ${DB_USER};"
 
 #######################################
-# SCHEMA
+# SCHEMA + FUNCTION (CRITICAL FIX)
 #######################################
 sudo -u postgres psql -d "${DB_NAME}" <<'EOF'
 CREATE TABLE IF NOT EXISTS traps (
@@ -136,6 +132,59 @@ CREATE TABLE IF NOT EXISTS historical_alarms (
     description TEXT,
     device_time TEXT
 );
+
+-- 🔥 THIS WAS MISSING BEFORE — NOW FIXED
+CREATE OR REPLACE FUNCTION process_alarm_row(
+    p_received_at TIMESTAMP,
+    p_site TEXT,
+    p_device_type TEXT,
+    p_source TEXT,
+    p_alarm_code TEXT,
+    p_severity TEXT,
+    p_description TEXT,
+    p_state TEXT,
+    p_device_time TEXT
+) RETURNS VOID AS $$
+BEGIN
+    IF p_state = 'Fault' THEN
+        INSERT INTO active_alarms (
+            first_seen, last_seen,
+            site, device_type, source,
+            alarm_code, severity,
+            description, device_time
+        )
+        VALUES (
+            p_received_at, p_received_at,
+            p_site, p_device_type, p_source,
+            p_alarm_code, p_severity,
+            p_description, p_device_time
+        )
+        ON CONFLICT (site, device_type, source, alarm_code)
+        DO UPDATE SET
+            last_seen   = EXCLUDED.last_seen,
+            severity    = EXCLUDED.severity,
+            description = EXCLUDED.description;
+    END IF;
+
+    IF p_state = 'Recovery' THEN
+        INSERT INTO historical_alarms
+        SELECT alarm_id, first_seen, last_seen, p_received_at,
+               site, device_type, source,
+               alarm_code, severity, description, device_time
+        FROM active_alarms
+        WHERE site = p_site
+          AND device_type = p_device_type
+          AND source = p_source
+          AND alarm_code = p_alarm_code;
+
+        DELETE FROM active_alarms
+        WHERE site = p_site
+          AND device_type = p_device_type
+          AND source = p_source
+          AND alarm_code = p_alarm_code;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
 EOF
 
 #######################################
@@ -150,18 +199,18 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER};
 EOF
 
 #######################################
-# DB TEST (TCP)
+# DB CONNECTION TEST (NO PEER AUTH)
 #######################################
 PGPASSWORD="${DB_PASS}" psql \
   -h 127.0.0.1 \
   -U "${DB_USER}" \
   -d "${DB_NAME}" \
-  -c "SELECT 1;" >/dev/null
+  -c "SELECT current_database();" >/dev/null
 
 echo "✅ Database verified"
 
 #######################################
-# APP SETUP
+# PYTHON APP
 #######################################
 mkdir -p "${APP_DIR}"
 rm -rf "${VENV_DIR}"
@@ -212,11 +261,13 @@ systemctl restart ${SERVICE_NAME}
 # DONE
 #######################################
 echo ""
-echo "🎉 INSTALLATION COMPLETE"
-echo "------------------------"
-echo "✔ SNMP port set to ${SNMP_PORT}"
-echo "✔ Database ready"
-echo "✔ Trap receiver running"
+echo "🎉 INSTALLATION COMPLETE — FULL FIX"
+echo "----------------------------------"
+echo "✔ process_alarm_row CREATED"
+echo "✔ Active → History logic ENABLED"
+echo "✔ SNMP port: ${SNMP_PORT}"
+echo "✔ Database & permissions OK"
+echo "✔ Service running"
 echo ""
-echo "Check:"
-echo "  systemctl status ${SERVICE_NAME}"
+echo "Verify:"
+echo "  sudo -u postgres psql -d ${DB_NAME} -c '\df process_alarm_row'"
