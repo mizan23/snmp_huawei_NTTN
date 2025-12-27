@@ -1,11 +1,13 @@
 #!/bin/bash
 set -e
 
-echo "=== SNMP Alarm System Installer ==="
+echo "=========================================="
+echo " SNMP Huawei Alarm System - Full Installer "
+echo "=========================================="
 
-# -------------------------------
-# Ask user ONCE
-# -------------------------------
+# --------------------------------------------------
+# User input (asked ONCE)
+# --------------------------------------------------
 read -p "DB Host [127.0.0.1]: " DB_HOST
 read -p "DB Port [5432]: " DB_PORT
 read -p "DB Name [snmptraps]: " DB_NAME
@@ -22,25 +24,45 @@ SNMP_PORT="${SNMP_PORT:-8899}"
 
 INSTALL_DIR="/opt/snmp_alarm_system"
 ENV_FILE="$INSTALL_DIR/.env"
+SERVICE_FILE="/etc/systemd/system/snmp-trap-receiver.service"
 
-# -------------------------------
+# --------------------------------------------------
 # OS dependencies
-# -------------------------------
+# --------------------------------------------------
+echo "[+] Installing OS dependencies..."
 apt update
-apt install -y python3-venv python3-pip postgresql
+apt install -y python3 python3-venv python3-pip postgresql postgresql-contrib
 
-# -------------------------------
+# --------------------------------------------------
 # PostgreSQL setup
-# -------------------------------
+# --------------------------------------------------
+echo "[+] Configuring PostgreSQL..."
+
 sudo -u postgres psql <<EOF
-CREATE DATABASE $DB_NAME;
-CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';
+DO \$\$
+BEGIN
+   IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '$DB_NAME') THEN
+      CREATE DATABASE $DB_NAME;
+   END IF;
+END
+\$\$;
+
+DO \$\$
+BEGIN
+   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$DB_USER') THEN
+      CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';
+   END IF;
+END
+\$\$;
+
 GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;
 EOF
 
-# -------------------------------
-# Create tables + function (FIXED)
-# -------------------------------
+# --------------------------------------------------
+# Database schema + FIXED function
+# --------------------------------------------------
+echo "[+] Creating tables and alarm function..."
+
 sudo -u postgres psql -d "$DB_NAME" <<'EOF'
 CREATE TABLE IF NOT EXISTS traps (
     id BIGSERIAL PRIMARY KEY,
@@ -110,7 +132,7 @@ BEGIN
         ON CONFLICT (site, device_type, source, alarm_code)
         DO UPDATE SET
             last_seen = EXCLUDED.last_seen,
-            severity = EXCLUDED.severity,
+            severity  = EXCLUDED.severity,
             description = EXCLUDED.description;
     END IF;
 
@@ -135,33 +157,50 @@ END;
 $$ LANGUAGE plpgsql;
 EOF
 
-# -------------------------------
-# Python venv
-# -------------------------------
-mkdir -p "$INSTALL_DIR"
-python3 -m venv "$INSTALL_DIR/venv"
-source "$INSTALL_DIR/venv/bin/activate"
-pip install pysnmp==4.4.12 psycopg2-binary
-deactivate
+# --------------------------------------------------
+# Application files
+# --------------------------------------------------
+echo "[+] Installing application files..."
 
-# -------------------------------
-# Write shared .env
-# -------------------------------
+mkdir -p "$INSTALL_DIR"
+
+cp pysnmp_trap_receiver.py "$INSTALL_DIR/"
+cp cli_user.py "$INSTALL_DIR/"
+
+chmod +x "$INSTALL_DIR/pysnmp_trap_receiver.py"
+chmod +x "$INSTALL_DIR/cli_user.py"
+
+# --------------------------------------------------
+# Python virtual environment
+# --------------------------------------------------
+echo "[+] Creating Python virtual environment..."
+
+python3 -m venv "$INSTALL_DIR/venv"
+"$INSTALL_DIR/venv/bin/pip" install --upgrade pip
+"$INSTALL_DIR/venv/bin/pip" install pysnmp==4.4.12 psycopg2-binary
+
+# --------------------------------------------------
+# Write systemd-compatible .env (NO export)
+# --------------------------------------------------
+echo "[+] Writing environment file..."
+
 cat <<EOF > "$ENV_FILE"
-export DB_HOST=$DB_HOST
-export DB_PORT=$DB_PORT
-export DB_NAME=$DB_NAME
-export DB_USER=$DB_USER
-export DB_PASS=$DB_PASS
-export SNMP_PORT=$SNMP_PORT
+DB_HOST=$DB_HOST
+DB_PORT=$DB_PORT
+DB_NAME=$DB_NAME
+DB_USER=$DB_USER
+DB_PASS=$DB_PASS
+SNMP_PORT=$SNMP_PORT
 EOF
 
 chmod 600 "$ENV_FILE"
 
-# -------------------------------
+# --------------------------------------------------
 # systemd service
-# -------------------------------
-cat <<EOF > /etc/systemd/system/snmp-trap-receiver.service
+# --------------------------------------------------
+echo "[+] Creating systemd service..."
+
+cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=SNMP Trap Receiver
 After=network.target postgresql.service
@@ -180,19 +219,22 @@ User=root
 WantedBy=multi-user.target
 EOF
 
+# --------------------------------------------------
+# Enable & start service
+# --------------------------------------------------
+echo "[+] Enabling and starting service..."
+
+systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable snmp-trap-receiver.service
 systemctl restart snmp-trap-receiver.service
 
-# -------------------------------
-# CLI wrapper
-# -------------------------------
-cat <<EOF > $INSTALL_DIR/cli
-#!/bin/bash
-source $ENV_FILE
-exec $INSTALL_DIR/cli_user.py "\$@"
-EOF
-
-chmod +x "$INSTALL_DIR/cli"
-
-echo "=== INSTALL COMPLETE ==="
+echo "=========================================="
+echo " INSTALL COMPLETE"
+echo "=========================================="
+echo " Service : snmp-trap-receiver.service"
+echo " Install : $INSTALL_DIR"
+echo " SNMP UDP: $SNMP_PORT"
+echo
+echo " Check status:"
+echo "   sudo systemctl status snmp-trap-receiver.service"
