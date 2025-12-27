@@ -1,13 +1,22 @@
 #!/bin/bash
 set -e
 
-echo "=================================================="
-echo " SNMP Huawei NTTN Alarm System - FINAL INSTALLER"
-echo "=================================================="
+echo "======================================================"
+echo " SNMP Huawei NTTN Alarm System - FINAL FIX INSTALLER"
+echo " Python 3.10 enforced (pysnmp compatible)"
+echo "======================================================"
 
-# --------------------------------------------------
-# User input (asked once)
-# --------------------------------------------------
+# ------------------------------------------------------
+# Root check
+# ------------------------------------------------------
+if [[ $EUID -ne 0 ]]; then
+  echo "❌ Run as root: sudo ./install_all.sh"
+  exit 1
+fi
+
+# ------------------------------------------------------
+# User input
+# ------------------------------------------------------
 read -p "DB Host [127.0.0.1]: " DB_HOST
 read -p "DB Port [5432]: " DB_PORT
 read -p "DB Name [snmptraps]: " DB_NAME
@@ -26,43 +35,53 @@ INSTALL_DIR="/opt/snmp_alarm_system"
 ENV_FILE="$INSTALL_DIR/.env"
 SERVICE_FILE="/etc/systemd/system/snmp-trap-receiver.service"
 
-# --------------------------------------------------
-# OS dependencies
-# --------------------------------------------------
+# ------------------------------------------------------
+# Base OS packages
+# ------------------------------------------------------
 echo "[+] Installing OS dependencies..."
-apt update
-apt install -y python3 python3-venv python3-pip postgresql postgresql-contrib
+apt update -y
+apt install -y \
+  software-properties-common \
+  build-essential \
+  postgresql \
+  postgresql-contrib
 
-# --------------------------------------------------
-# PostgreSQL: create DB and user (CORRECT WAY)
-# --------------------------------------------------
+# ------------------------------------------------------
+# Install Python 3.10 (CRITICAL FIX)
+# ------------------------------------------------------
+echo "[+] Installing Python 3.10 (pysnmp compatible)..."
+
+add-apt-repository -y ppa:deadsnakes/ppa
+apt update -y
+apt install -y python3.10 python3.10-venv python3.10-distutils
+
+PYTHON_BIN="/usr/bin/python3.10"
+
+# ------------------------------------------------------
+# PostgreSQL startup
+# ------------------------------------------------------
+systemctl enable postgresql
+systemctl start postgresql
+
+# ------------------------------------------------------
+# PostgreSQL DB & user (SAFE / IDEMPOTENT)
+# ------------------------------------------------------
 echo "[+] Configuring PostgreSQL..."
 
-# Create database if it does not exist
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
   || sudo -u postgres psql -c "CREATE DATABASE $DB_NAME"
 
-# Create user if it does not exist
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 \
   || sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS'"
 
-# Grant privileges (safe to re-run)
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER"
 
-# --------------------------------------------------
-# Database schema + FIXED function
-# --------------------------------------------------
-echo "[+] Creating tables and alarm function..."
+# ------------------------------------------------------
+# Database schema + alarm function
+# ------------------------------------------------------
+echo "[+] Creating database schema..."
 
 sudo -u postgres psql -d "$DB_NAME" <<'EOF'
-CREATE TABLE IF NOT EXISTS traps (
-    id BIGSERIAL PRIMARY KEY,
-    received_at TIMESTAMPTZ NOT NULL,
-    sender TEXT,
-    raw JSONB,
-    parsed JSONB
-);
-
 CREATE TABLE IF NOT EXISTS active_alarms (
     alarm_id BIGSERIAL PRIMARY KEY,
     first_seen TIMESTAMPTZ NOT NULL,
@@ -122,8 +141,8 @@ BEGIN
         )
         ON CONFLICT (site, device_type, source, alarm_code)
         DO UPDATE SET
-            last_seen  = EXCLUDED.last_seen,
-            severity   = EXCLUDED.severity,
+            last_seen = EXCLUDED.last_seen,
+            severity  = EXCLUDED.severity,
             description = EXCLUDED.description;
     END IF;
 
@@ -148,30 +167,36 @@ END;
 $$ LANGUAGE plpgsql;
 EOF
 
-# --------------------------------------------------
-# Application files (CRITICAL FIX)
-# --------------------------------------------------
+# ------------------------------------------------------
+# Install application files
+# ------------------------------------------------------
 echo "[+] Installing application files..."
 
 mkdir -p "$INSTALL_DIR"
 cp pysnmp_trap_receiver.py "$INSTALL_DIR/"
 cp cli_user.py "$INSTALL_DIR/"
 
-chmod +x "$INSTALL_DIR/pysnmp_trap_receiver.py"
-chmod +x "$INSTALL_DIR/cli_user.py"
+chmod +x "$INSTALL_DIR/"*.py
 
-# --------------------------------------------------
-# Python virtual environment
-# --------------------------------------------------
-echo "[+] Creating Python virtual environment..."
+# ------------------------------------------------------
+# Python virtual environment (PYTHON 3.10)
+# ------------------------------------------------------
+echo "[+] Creating Python 3.10 virtual environment..."
 
-python3 -m venv "$INSTALL_DIR/venv"
-"$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install pysnmp==4.4.12 psycopg2-binary
+$PYTHON_BIN -m venv "$INSTALL_DIR/venv"
 
-# --------------------------------------------------
-# Write systemd-compatible .env (NO export)
-# --------------------------------------------------
+"$INSTALL_DIR/venv/bin/pip" install --upgrade pip setuptools wheel
+
+# 🔒 HARD PIN (STABLE + TESTED)
+"$INSTALL_DIR/venv/bin/pip" install \
+  pysnmp==4.4.12 \
+  pyasn1==0.4.8 \
+  pyasn1-modules==0.2.8 \
+  psycopg2-binary
+
+# ------------------------------------------------------
+# Environment file (systemd-safe)
+# ------------------------------------------------------
 echo "[+] Writing environment file..."
 
 cat <<EOF > "$ENV_FILE"
@@ -185,9 +210,9 @@ EOF
 
 chmod 600 "$ENV_FILE"
 
-# --------------------------------------------------
+# ------------------------------------------------------
 # systemd service
-# --------------------------------------------------
+# ------------------------------------------------------
 echo "[+] Creating systemd service..."
 
 cat <<EOF > "$SERVICE_FILE"
@@ -209,9 +234,9 @@ User=root
 WantedBy=multi-user.target
 EOF
 
-# --------------------------------------------------
+# ------------------------------------------------------
 # Enable & start service
-# --------------------------------------------------
+# ------------------------------------------------------
 echo "[+] Enabling and starting service..."
 
 systemctl daemon-reexec
@@ -219,8 +244,8 @@ systemctl daemon-reload
 systemctl enable snmp-trap-receiver.service
 systemctl restart snmp-trap-receiver.service
 
-echo "=================================================="
-echo " INSTALL COMPLETE — SYSTEM SHOULD BE RUNNING"
-echo "=================================================="
-echo " Check status with:"
+echo "======================================================"
+echo " INSTALL COMPLETE"
+echo "======================================================"
+echo " Verify:"
 echo "   sudo systemctl status snmp-trap-receiver.service"
