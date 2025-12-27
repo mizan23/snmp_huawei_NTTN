@@ -9,7 +9,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "🚀 Installing SNMP Alarm System (FULL FIX – DB SAFE)"
+echo "🚀 Installing SNMP Alarm System (FINAL FIX)"
 
 #######################################
 # INTERACTIVE DB CONFIG
@@ -50,24 +50,12 @@ apt install -y \
   software-properties-common
 
 #######################################
-# PYTHON 3.11 (MANDATORY)
+# PYTHON 3.11
 #######################################
 if ! command -v python3.11 >/dev/null 2>&1; then
-  echo "🐍 Installing Python 3.11..."
   add-apt-repository ppa:deadsnakes/ppa -y
   apt update
   apt install -y python3.11 python3.11-venv
-fi
-
-PY_VER=$(python3.11 - <<EOF
-import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}")
-EOF
-)
-
-if [[ "$PY_VER" != "$PYTHON_REQUIRED" ]]; then
-  echo "❌ Python 3.11 required"
-  exit 1
 fi
 
 #######################################
@@ -77,7 +65,7 @@ systemctl enable postgresql
 systemctl start postgresql
 
 #######################################
-# DATABASE CREATION (NO FUNCTIONS!)
+# CREATE DATABASE (NO FUNCTIONS)
 #######################################
 if ! sudo -u postgres psql -d postgres -tAc \
   "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
@@ -88,7 +76,7 @@ else
 fi
 
 #######################################
-# USER / ROLE CREATION
+# CREATE USER / ROLE
 #######################################
 if ! sudo -u postgres psql -d postgres -tAc \
   "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
@@ -100,7 +88,7 @@ else
 fi
 
 #######################################
-# DATABASE OWNERSHIP (CLEAN)
+# ASSIGN DB OWNER
 #######################################
 sudo -u postgres psql -d postgres -c \
   "ALTER DATABASE ${DB_NAME} OWNER TO ${DB_USER};"
@@ -201,7 +189,7 @@ $$ LANGUAGE plpgsql;
 EOF
 
 #######################################
-# DATABASE PERMISSIONS (STORE & VIEW)
+# DATABASE PERMISSIONS (STORE + VIEW)
 #######################################
 sudo -u postgres psql -d "${DB_NAME}" <<EOF
 GRANT USAGE ON SCHEMA public TO ${DB_USER};
@@ -220,36 +208,29 @@ GRANT USAGE, SELECT ON SEQUENCES TO ${DB_USER};
 EOF
 
 #######################################
-# DB CONNECTION TEST
+# DB CONNECTION TEST (FIXED: TCP + PASSWORD)
 #######################################
 PGPASSWORD="${DB_PASS}" psql \
+  -h 127.0.0.1 \
+  -p 5432 \
   -U "${DB_USER}" \
   -d "${DB_NAME}" \
-  -c "SELECT current_database();" >/dev/null
+  -c "SELECT current_user, current_database();" >/dev/null
 
-echo "✅ Database verified"
+echo "✅ Database access verified"
 
 #######################################
-# APPLICATION DIRECTORY
+# APPLICATION SETUP
 #######################################
 mkdir -p "${APP_DIR}"
-
-#######################################
-# CLEAN PYTHON VENV
-#######################################
 rm -rf "${VENV_DIR}"
+
 python3.11 -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
 
 pip install --upgrade pip
-pip install \
-  pysnmp==4.4.12 \
-  pyasn1==0.4.8 \
-  psycopg2-binary
+pip install pysnmp==4.4.12 pyasn1==0.4.8 psycopg2-binary
 
-#######################################
-# APPLICATION FILES
-#######################################
 curl -fsSL ${BASE_URL}/pysnmp_trap_receiver.py -o ${APP_DIR}/pysnmp_trap_receiver.py
 curl -fsSL ${BASE_URL}/cli_user.py -o ${APP_DIR}/cli_user.py
 chmod +x ${APP_DIR}/*.py
@@ -274,6 +255,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=DB_NAME=${DB_NAME}
 Environment=DB_USER=${DB_USER}
 Environment=DB_PASS=${DB_PASS}
+Environment=DB_HOST=127.0.0.1
+Environment=DB_PORT=5432
 
 [Install]
 WantedBy=multi-user.target
@@ -288,13 +271,13 @@ systemctl restart ${SERVICE_NAME}
 # DONE
 #######################################
 echo ""
-echo "🎉 INSTALLATION COMPLETE — FULL FIX"
+echo "🎉 INSTALLATION COMPLETE — FINAL FIX"
 echo "----------------------------------"
-echo "✔ PostgreSQL bug fixed (no CREATE DATABASE in functions)"
+echo "✔ PostgreSQL auth fixed (no peer auth issues)"
 echo "✔ DB user can STORE & VIEW traps"
+echo "✔ Schema + function installed"
 echo "✔ Python 3.11 enforced"
-echo "✔ Virtualenv rebuilt"
-echo "✔ SNMP trap receiver running"
+echo "✔ Service running"
 echo ""
-echo "Check status:"
+echo "Check:"
 echo "  systemctl status ${SERVICE_NAME}"
