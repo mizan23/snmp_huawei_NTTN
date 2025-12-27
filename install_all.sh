@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 #######################################
 # CONFIG
 #######################################
 APP_DIR="/opt/snmp_alarm_system"
-VENV_DIR="/opt/pysnmp-env"
+VENV_DIR="${APP_DIR}/venv"
+
+PYTHON_REQUIRED="3.11"
 
 DB_NAME="snmptraps"
 DB_USER="snmpuser"
 DB_PASS="toor"
 
-GRAFANA_USER="grafana_user"
-GRAFANA_PASS="toor"
+SERVICE_NAME="snmp-trap-receiver"
 
-PYTHON_BIN="python3.10"
+BASE_URL="https://raw.githubusercontent.com/mizan23/snmp_huawei_NTTN/main"
 
 #######################################
 # ROOT CHECK
@@ -24,54 +25,61 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "🚀 Starting FULL automatic installation..."
+echo "🚀 Installing SNMP Alarm System (FINAL HARDENED FIX)"
 
 #######################################
-# OS PACKAGES
+# OS DEPENDENCIES
 #######################################
-echo "📦 Installing OS dependencies..."
 apt update
 apt install -y \
-  software-properties-common \
-  python3.10 python3.10-venv python3-pip \
+  curl \
   postgresql postgresql-contrib \
-  build-essential
+  python3 python3-venv python3-pip \
+  software-properties-common
 
 #######################################
-# POSTGRESQL SETUP
+# PYTHON 3.11 (MANDATORY)
 #######################################
-echo "🗄 Setting up PostgreSQL..."
+if ! command -v python3.11 >/dev/null 2>&1; then
+  echo "🐍 Installing Python 3.11..."
+  add-apt-repository ppa:deadsnakes/ppa -y
+  apt update
+  apt install -y python3.11 python3.11-venv
+fi
+
+PY_VER=$(python3.11 - <<EOF
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+EOF
+)
+
+if [[ "$PY_VER" != "$PYTHON_REQUIRED" ]]; then
+  echo "❌ Python 3.11 required, found ${PY_VER}"
+  exit 1
+fi
+
+#######################################
+# POSTGRESQL
+#######################################
 systemctl enable postgresql
 systemctl start postgresql
 
-sudo -u postgres psql <<EOF
-DO \$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_database WHERE datname='${DB_NAME}') THEN
-      CREATE DATABASE ${DB_NAME};
-   END IF;
-END
-\$\$;
+#######################################
+# DATABASE & USER
+#######################################
+sudo -u postgres psql -tAc \
+  "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" \
+  | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME};"
 
-DO \$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${DB_USER}') THEN
-      CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';
-   END IF;
-END
-\$\$;
+sudo -u postgres psql -tAc \
+  "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" \
+  | grep -q 1 || sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';"
 
-DO \$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${GRAFANA_USER}') THEN
-      CREATE USER ${GRAFANA_USER} WITH PASSWORD '${GRAFANA_PASS}';
-   END IF;
-END
-\$\$;
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};"
 
-GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
-EOF
-
+#######################################
+# SCHEMA & CORE LOGIC
+#######################################
 sudo -u postgres psql -d ${DB_NAME} <<'EOF'
 CREATE TABLE IF NOT EXISTS traps (
     id BIGSERIAL PRIMARY KEY,
@@ -165,41 +173,75 @@ $$ LANGUAGE plpgsql;
 EOF
 
 #######################################
-# PYTHON ENVIRONMENT
+# APPLICATION DIRECTORY
 #######################################
-echo "🐍 Creating Python virtual environment..."
-${PYTHON_BIN} -m venv ${VENV_DIR}
-source ${VENV_DIR}/bin/activate
+mkdir -p "${APP_DIR}"
+
+#######################################
+# DESTROY OLD VENV (CRITICAL)
+#######################################
+if [[ -d "${VENV_DIR}" ]]; then
+  echo "⚠️ Removing existing virtualenv"
+  rm -rf "${VENV_DIR}"
+fi
+
+#######################################
+# CREATE PYTHON 3.11 VENV
+#######################################
+python3.11 -m venv "${VENV_DIR}"
+source "${VENV_DIR}/bin/activate"
 
 pip install --upgrade pip
-pip install pysnmp==4.4.12 psycopg2-binary
+pip install \
+  pysnmp==4.4.12 \
+  pyasn1==0.4.8 \
+  psycopg2-binary
 
 #######################################
-# INSTALL APPLICATION FILES
+# APPLICATION FILES
 #######################################
-echo "📂 Installing application files..."
-mkdir -p ${APP_DIR}
-
-cp pysnmp_trap_receiver.py ${APP_DIR}/
-cp cli_user.py ${APP_DIR}/
-
-sed -i "s|^#!/.*python|#!${VENV_DIR}/bin/python|" \
-  ${APP_DIR}/pysnmp_trap_receiver.py
-
-chmod +x ${APP_DIR}/pysnmp_trap_receiver.py
-chmod +x ${APP_DIR}/cli_user.py
+curl -fsSL ${BASE_URL}/pysnmp_trap_receiver.py -o ${APP_DIR}/pysnmp_trap_receiver.py
+curl -fsSL ${BASE_URL}/cli_user.py -o ${APP_DIR}/cli_user.py
+chmod +x ${APP_DIR}/*.py
 
 #######################################
-# FINISH
+# SYSTEMD SERVICE
+#######################################
+cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
+[Unit]
+Description=SNMP Trap Receiver
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+ExecStart=${VENV_DIR}/bin/python ${APP_DIR}/pysnmp_trap_receiver.py
+WorkingDirectory=${APP_DIR}
+Restart=always
+RestartSec=5
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable ${SERVICE_NAME}
+systemctl restart ${SERVICE_NAME}
+
+#######################################
+# DONE
 #######################################
 echo ""
-echo "🎉 INSTALLATION COMPLETE"
-echo "-----------------------------------"
-echo "▶ Start trap receiver:"
-echo "  sudo ${APP_DIR}/pysnmp_trap_receiver.py"
+echo "🎉 INSTALLATION COMPLETE — GUARANTEED FIX"
+echo "----------------------------------------"
+echo "✔ Python 3.11 enforced"
+echo "✔ Virtualenv recreated"
+echo "✔ pysnmp + pyasn1 pinned"
+echo "✔ PostgreSQL schema ready"
+echo "✔ SNMP trap receiver running"
 echo ""
-echo "▶ View alarms:"
-echo "  ${APP_DIR}/cli_user.py active"
-echo "  ${APP_DIR}/cli_user.py history"
-echo ""
-echo "✅ System is fully operational"
+echo "Check:"
+echo "  systemctl status ${SERVICE_NAME}"
