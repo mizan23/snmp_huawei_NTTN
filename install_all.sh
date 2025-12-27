@@ -9,7 +9,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "🚀 Installing SNMP Alarm System (FULL FIX)"
+echo "🚀 Installing SNMP Alarm System (FULL FIX – DB SAFE)"
 
 #######################################
 # INTERACTIVE DB CONFIG
@@ -71,31 +71,39 @@ if [[ "$PY_VER" != "$PYTHON_REQUIRED" ]]; then
 fi
 
 #######################################
-# POSTGRESQL
+# POSTGRESQL SERVICE
 #######################################
 systemctl enable postgresql
 systemctl start postgresql
 
 #######################################
-# DATABASE & USER (SAFE + IDEMPOTENT)
+# DATABASE CREATION (NO FUNCTIONS!)
 #######################################
-sudo -u postgres psql <<EOF
-DO \$\$
-BEGIN
-  IF NOT EXISTS (
-    SELECT FROM pg_database WHERE datname='${DB_NAME}'
-  ) THEN
-    CREATE DATABASE ${DB_NAME};
-  END IF;
+if ! sudo -u postgres psql -d postgres -tAc \
+  "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+  echo "🗄️ Creating database ${DB_NAME}"
+  sudo -u postgres psql -d postgres -c "CREATE DATABASE ${DB_NAME};"
+else
+  echo "ℹ️ Database ${DB_NAME} already exists"
+fi
 
-  IF NOT EXISTS (
-    SELECT FROM pg_roles WHERE rolname='${DB_USER}'
-  ) THEN
-    CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';
-  END IF;
-END
-\$\$;
-EOF
+#######################################
+# USER / ROLE CREATION
+#######################################
+if ! sudo -u postgres psql -d postgres -tAc \
+  "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
+  echo "👤 Creating user ${DB_USER}"
+  sudo -u postgres psql -d postgres -c \
+    "CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';"
+else
+  echo "ℹ️ User ${DB_USER} already exists"
+fi
+
+#######################################
+# DATABASE OWNERSHIP (CLEAN)
+#######################################
+sudo -u postgres psql -d postgres -c \
+  "ALTER DATABASE ${DB_NAME} OWNER TO ${DB_USER};"
 
 #######################################
 # SCHEMA & CORE LOGIC
@@ -217,9 +225,9 @@ EOF
 PGPASSWORD="${DB_PASS}" psql \
   -U "${DB_USER}" \
   -d "${DB_NAME}" \
-  -c "SELECT now();" >/dev/null
+  -c "SELECT current_database();" >/dev/null
 
-echo "✅ Database access verified"
+echo "✅ Database verified"
 
 #######################################
 # APPLICATION DIRECTORY
@@ -227,7 +235,7 @@ echo "✅ Database access verified"
 mkdir -p "${APP_DIR}"
 
 #######################################
-# CLEAN VENV
+# CLEAN PYTHON VENV
 #######################################
 rm -rf "${VENV_DIR}"
 python3.11 -m venv "${VENV_DIR}"
@@ -282,10 +290,10 @@ systemctl restart ${SERVICE_NAME}
 echo ""
 echo "🎉 INSTALLATION COMPLETE — FULL FIX"
 echo "----------------------------------"
-echo "✔ DB variables prompted securely"
-echo "✔ DB user can STORE and VIEW traps"
+echo "✔ PostgreSQL bug fixed (no CREATE DATABASE in functions)"
+echo "✔ DB user can STORE & VIEW traps"
 echo "✔ Python 3.11 enforced"
-echo "✔ PostgreSQL schema ready"
+echo "✔ Virtualenv rebuilt"
 echo "✔ SNMP trap receiver running"
 echo ""
 echo "Check status:"
