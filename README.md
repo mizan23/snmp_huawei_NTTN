@@ -1,179 +1,134 @@
-# Huawei SNMPv3 Alarm Management System  
-*(pysnmp + PostgreSQL)*
+# 📘 SNMP Alarm Management System  
+Active & Historical Alarm Handling using pysnmp + PostgreSQL
 
-This project provides a **production-ready SNMPv3 alarm management system**
-compatible with **Huawei iMaster NCE**.
-
-It includes:
-
-- SNMPv3 trap receiver
-- Active → historical alarm lifecycle
-- PostgreSQL backend
-- Human-readable CLI (`active` / `history`)
-- Tested with Huawei **SHA-256 + AES-128 (AuthPriv)**
+Enterprise-grade SNMPv3 alarm ingestion and lifecycle management system designed for Huawei telecom environments.
 
 ---
 
-## 📁 Repository Structure
+## 🚀 Overview
 
-```text
-.
-├── pysnmp_trap_receiver.py   # Receives SNMP traps & updates alarms
-├── alarm_processor.py        # Moves recovered alarms to history
-├── cli_user.py               # CLI: view active & historical alarms
-└── README.md
-```
+This project implements a telecom-grade SNMP alarm management system with:
 
----
----
-
-## ✅ STEP-BY-STEP DEPLOYMENT  
-*(Follow in order)*
+- SNMPv3 trap reception (Huawei compatible)
+- PostgreSQL-backed alarm lifecycle engine
+- Separation of Active and Historical (Recovered) alarms
+- Operator-friendly CLI viewer
+- Grafana-ready database schema
 
 ---
 
-## 🔹 STEP 1 — Install System Requirements
+## 🧠 Architecture
 
-```bash
-sudo apt update
-sudo apt install -y \
-  python3.10 \
-  python3.10-venv \
-  python3-pip \
-  postgresql \
-  postgresql-contrib
-```
-
----
-
-## 🔹 STEP 2 — Create PostgreSQL Database
-
-```bash
-sudo -u postgres psql
-```
-
-```sql
-CREATE DATABASE snmptraps;
-CREATE USER snmpuser WITH PASSWORD 'toor';
-ALTER ROLE snmpuser SET client_encoding TO 'utf8';
-ALTER ROLE snmpuser SET default_transaction_isolation TO 'read committed';
-ALTER ROLE snmpuser SET timezone TO 'Asia/Dhaka';
-GRANT ALL PRIVILEGES ON DATABASE snmptraps TO snmpuser;
-```
-
-```sql
-\q
-```
-
-### ✔ Database Summary
-
-| Item | Value |
-|----|----|
-| Database | snmptraps |
-| User | snmpuser |
-| Password | toor |
-| Timezone | Asia/Dhaka |
+Network Devices (SNMPv3)
+        |
+        v
+pysnmp_trap_receiver.py
+        |
+        v
+PostgreSQL
+├── traps
+├── active_alarms
+└── historical_alarms
+        |
+        +── cli_user.py
+        +── Grafana
 
 ---
 
-## 🔹 STEP 3 — Create Database Tables
+## 🛠 Requirements
 
-```bash
-psql -h localhost -U snmpuser -d snmptraps
-```
+- Ubuntu 20.04 / 22.04 / 24.04
+- Python 3.10
+- PostgreSQL 12+
+- Huawei SNMPv3 devices
 
-```sql
+---
+
+## 1️⃣ Install Required Software
+
+sudo apt update  
+sudo apt install -y python3-pip postgresql postgresql-contrib  
+pip3 install pysnmp psycopg2-binary
+
+---
+
+## 2️⃣ Create Virtual Environment
+
+python3.10 -m venv /opt/pysnmp-env  
+source /opt/pysnmp-env/bin/activate  
+
+pip install --upgrade pip  
+pip install pysnmp==4.4.12 psycopg2-binary
+
+---
+
+## 3️⃣ PostgreSQL Setup
+
+CREATE DATABASE snmptraps;  
+CREATE USER snmpuser WITH PASSWORD 'toor';  
+GRANT ALL PRIVILEGES ON DATABASE snmptraps TO snmpuser;  
+
+CREATE USER grafana_user WITH PASSWORD 'toor';
+
+---
+
+## 4️⃣ Tables
+
+CREATE TABLE traps (
+    id BIGSERIAL PRIMARY KEY,
+    received_at TIMESTAMP NOT NULL,
+    sender TEXT,
+    raw JSONB,
+    parsed JSONB
+);
+
 CREATE TABLE active_alarms (
-    alarm_id TEXT PRIMARY KEY,
-    first_seen TIMESTAMP,
-    last_seen TIMESTAMP,
+    alarm_id BIGSERIAL PRIMARY KEY,
+    first_seen TIMESTAMP NOT NULL,
+    last_seen TIMESTAMP NOT NULL,
     site TEXT,
     device_type TEXT,
     source TEXT,
-    severity TEXT,
     alarm_code TEXT,
+    severity TEXT,
     description TEXT,
-    raw JSONB
+    device_time TEXT
 );
 
 CREATE TABLE historical_alarms (
-    alarm_id TEXT,
-    first_seen TIMESTAMP,
-    last_seen TIMESTAMP,
-    recovery_time TIMESTAMP,
+    alarm_id BIGINT,
+    first_seen TIMESTAMP NOT NULL,
+    last_seen TIMESTAMP NOT NULL,
+    recovery_time TIMESTAMP NOT NULL,
     site TEXT,
     device_type TEXT,
     source TEXT,
-    severity TEXT,
     alarm_code TEXT,
+    severity TEXT,
     description TEXT,
-    raw JSONB
+    device_time TEXT
 );
 
-CREATE INDEX idx_active_last_seen ON active_alarms(last_seen);
-CREATE INDEX idx_hist_recovery ON historical_alarms(recovery_time);
-```
-
-```sql
-\q
-```
-
 ---
 
-## 🔹 STEP 4 — Python Virtual Environment
+## 5️⃣ Usage
 
-```bash
-python3.10 -m venv /opt/pysnmp-env
-source /opt/pysnmp-env/bin/activate
-```
+Start trap receiver:
+sudo pysnmp_trap_receiver.py
 
----
-
-## 🔹 STEP 5 — Install Python Libraries
-
-```bash
-pip install --upgrade pip
-pip install pysnmp==4.4.12 psycopg2-binary
-```
-
----
-
-## 🔹 STEP 6 — Configure SNMP Trap Receiver
-
-```python
-SNMP_USER = "snmpuser"
-AUTH_KEY  = "Fiber@Dwdm@9800"
-PRIV_KEY  = "Fiber@Dwdm@9800"
-HUAWEI_ENGINE_ID = b"\x80\x00\x13\x70\x01\xc0\xa8\x2a\x05"
-```
-
----
-
-## 🔹 STEP 7 — Start Trap Receiver
-
-```bash
-chmod +x pysnmp_trap_receiver.py
-sudo ./pysnmp_trap_receiver.py
-```
-
----
-
-## 🔹 STEP 9 — CLI Usage
-
-```bash
-chmod +x cli_user.py
-./cli_user.py active
-./cli_user.py history
-```
+View alarms:
+cli_user.py active  
+cli_user.py history  
 
 ---
 
 ## ✅ Final Result
 
-✔ Huawei SNMPv3 compatible  
-✔ AuthPriv (SHA-256 + AES-128)  
-✔ Active / historical lifecycle  
-✔ PostgreSQL backend  
-✔ CLI monitoring  
-✔ GitHub-ready  
+✔ Active alarms tracked  
+✔ Recovery handled automatically  
+✔ CLI readable output  
 ✔ Enterprise-grade design  
+
+---
+
+MIT License
