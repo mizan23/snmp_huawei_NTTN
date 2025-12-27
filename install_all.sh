@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-echo "=========================================="
-echo " SNMP Huawei Alarm System - Full Installer "
-echo "=========================================="
+echo "=================================================="
+echo " SNMP Huawei NTTN Alarm System - FINAL INSTALLER"
+echo "=================================================="
 
 # --------------------------------------------------
-# User input (asked ONCE)
+# User input (asked once)
 # --------------------------------------------------
 read -p "DB Host [127.0.0.1]: " DB_HOST
 read -p "DB Port [5432]: " DB_PORT
@@ -34,29 +34,20 @@ apt update
 apt install -y python3 python3-venv python3-pip postgresql postgresql-contrib
 
 # --------------------------------------------------
-# PostgreSQL setup
+# PostgreSQL: create DB and user (CORRECT WAY)
 # --------------------------------------------------
 echo "[+] Configuring PostgreSQL..."
 
-sudo -u postgres psql <<EOF
-DO \$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '$DB_NAME') THEN
-      CREATE DATABASE $DB_NAME;
-   END IF;
-END
-\$\$;
+# Create database if it does not exist
+sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
+  || sudo -u postgres psql -c "CREATE DATABASE $DB_NAME"
 
-DO \$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$DB_USER') THEN
-      CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';
-   END IF;
-END
-\$\$;
+# Create user if it does not exist
+sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 \
+  || sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS'"
 
-GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;
-EOF
+# Grant privileges (safe to re-run)
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER"
 
 # --------------------------------------------------
 # Database schema + FIXED function
@@ -131,8 +122,8 @@ BEGIN
         )
         ON CONFLICT (site, device_type, source, alarm_code)
         DO UPDATE SET
-            last_seen = EXCLUDED.last_seen,
-            severity  = EXCLUDED.severity,
+            last_seen  = EXCLUDED.last_seen,
+            severity   = EXCLUDED.severity,
             description = EXCLUDED.description;
     END IF;
 
@@ -158,12 +149,11 @@ $$ LANGUAGE plpgsql;
 EOF
 
 # --------------------------------------------------
-# Application files
+# Application files (CRITICAL FIX)
 # --------------------------------------------------
 echo "[+] Installing application files..."
 
 mkdir -p "$INSTALL_DIR"
-
 cp pysnmp_trap_receiver.py "$INSTALL_DIR/"
 cp cli_user.py "$INSTALL_DIR/"
 
@@ -229,12 +219,8 @@ systemctl daemon-reload
 systemctl enable snmp-trap-receiver.service
 systemctl restart snmp-trap-receiver.service
 
-echo "=========================================="
-echo " INSTALL COMPLETE"
-echo "=========================================="
-echo " Service : snmp-trap-receiver.service"
-echo " Install : $INSTALL_DIR"
-echo " SNMP UDP: $SNMP_PORT"
-echo
-echo " Check status:"
+echo "=================================================="
+echo " INSTALL COMPLETE — SYSTEM SHOULD BE RUNNING"
+echo "=================================================="
+echo " Check status with:"
 echo "   sudo systemctl status snmp-trap-receiver.service"
