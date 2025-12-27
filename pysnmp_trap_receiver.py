@@ -1,71 +1,77 @@
-#!/opt/pysnmp-venv/bin/python
-# ==========================================================
-# pysnmp SNMPv3 Trap Receiver (FINAL FIXED VERSION)
-# - Python 3.10 (venv)
-# - pysnmp 4.4.12
-# - Huawei iMaster NCE compatible
-# - AuthPriv (SHA-256 + AES-128)
-# - EngineID explicitly bound
-# - Stores traps in PostgreSQL
-# ==========================================================
-
+#!/usr/bin/env python3
+import os
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import psycopg2
-
 from pysnmp.entity import engine, config
 from pysnmp.carrier.asyncore.dgram import udp
 from pysnmp.entity.rfc3413 import ntfrcv
 
+# =========================================================
+# STRICT ENVIRONMENT VALIDATION (NO DEFAULTS)
+# =========================================================
 
-# -------------------------
-# BASIC SETTINGS
-# -------------------------
+REQUIRED_ENV = [
+    "SNMP_PORT",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASS",
+]
+
+missing = [v for v in REQUIRED_ENV if v not in os.environ]
+if missing:
+    raise RuntimeError(
+        f"Missing required environment variables: {', '.join(missing)}"
+    )
+
+# =========================================================
+# CONFIG — ONLY FROM install_all.sh / systemd
+# =========================================================
 
 TZ = ZoneInfo("Asia/Dhaka")
 
 LISTEN_IP = "0.0.0.0"
-LISTEN_PORT = 8899
+LISTEN_PORT = int(os.environ["SNMP_PORT"])
 
-# PostgreSQL connection
 DB_CONFIG = {
-    "host": "localhost",
-    "dbname": "snmptraps",
-    "user": "snmpuser",
-    "password": "toor",   # <-- UPDATED PASSWORD
+    "host": os.environ["DB_HOST"],
+    "port": int(os.environ["DB_PORT"]),
+    "dbname": os.environ["DB_NAME"],
+    "user": os.environ["DB_USER"],
+    "password": os.environ["DB_PASS"],
 }
 
-# SNMPv3 credentials (MUST MATCH HUAWEI)
+# =========================================================
+# SNMPv3 SETTINGS (Huawei)
+# =========================================================
+
 SNMP_USER = "snmpuser"
 AUTH_KEY = "Fiber@Dwdm@9800"
 PRIV_KEY = "Fiber@Dwdm@9800"
 
-# Huawei SNMP Engine ID
-# From snmptrapd.conf:
-#   0x8000137001C0A82A05
+# Huawei Engine ID (must match device)
 HUAWEI_ENGINE_ID = b"\x80\x00\x13\x70\x01\xc0\xa8\x2a\x05"
 
-
-# -------------------------
+# =========================================================
 # SNMP ENGINE SETUP
-# -------------------------
+# =========================================================
 
 snmpEngine = engine.SnmpEngine()
 
-# Bind SNMPv3 user to Huawei engineID (CRITICAL)
 config.addV3User(
     snmpEngine,
     SNMP_USER,
-    config.usmHMAC192SHA256AuthProtocol,   # SHA-256
+    config.usmHMAC192SHA256AuthProtocol,
     AUTH_KEY,
-    config.usmAesCfb128Protocol,           # AES-128
+    config.usmAesCfb128Protocol,
     PRIV_KEY,
     securityEngineId=HUAWEI_ENGINE_ID
 )
 
-# Security level: authPriv
 config.addTargetParams(
     snmpEngine,
     "trap-creds",
@@ -75,35 +81,47 @@ config.addTargetParams(
 
 config.addContext(snmpEngine, "")
 
-# Let SNMP engine own the transport (CORRECT way)
+# 🔥 LISTEN ON INSTALLER-PROVIDED PORT
 config.addTransport(
     snmpEngine,
     udp.domainName,
     udp.UdpTransport().openServerMode((LISTEN_IP, LISTEN_PORT))
 )
 
-
-# -------------------------
+# =========================================================
 # TRAP CALLBACK
-# -------------------------
+# =========================================================
 
 def cbFun(snmpEngine, stateRef, contextEngineId, contextName, varBinds, cbCtx):
-    # Sender IP
     transportDomain, transportAddress = snmpEngine.msgAndPduDsp.getTransportInfo(stateRef)
     sender_ip = transportAddress[0]
-
     received_at = datetime.now(TZ)
 
-    vars_list = []
-    for oid, val in varBinds:
-        vars_list.append({
-            "oid": str(oid),
-            "value": val.prettyPrint()
-        })
+    vars_list = [
+        {"oid": str(oid), "value": val.prettyPrint()}
+        for oid, val in varBinds
+    ]
 
-    # Store in PostgreSQL
+    # -----------------------------------------------------
+    # BASIC ALARM EXTRACTION (SAFE DEFAULT LOGIC)
+    # Replace later with Huawei OID mapping
+    # -----------------------------------------------------
+    alarm_code = vars_list[0]["oid"]
+    description = vars_list[0]["value"]
+    severity = "Critical"
+    site = "UNKNOWN"
+    device_type = "HUAWEI"
+    device_time = received_at.isoformat()
+
+    # Simple recovery detection
+    state = "Recovery" if "clear" in description.lower() else "Fault"
+
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
+
+    # -----------------------------------------------------
+    # STORE RAW TRAP (AUDIT TABLE)
+    # -----------------------------------------------------
     cur.execute(
         """
         INSERT INTO traps (received_at, sender, raw, parsed)
@@ -116,26 +134,42 @@ def cbFun(snmpEngine, stateRef, contextEngineId, contextName, varBinds, cbCtx):
             json.dumps(vars_list),
         )
     )
+
+    # -----------------------------------------------------
+    # 🔥 CORE ALARM LIFECYCLE FUNCTION
+    # -----------------------------------------------------
+    cur.execute(
+        """
+        SELECT process_alarm_row(
+            %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        """,
+        (
+            received_at,   # p_received_at
+            site,          # p_site
+            device_type,   # p_device_type
+            sender_ip,     # p_source
+            alarm_code,    # p_alarm_code
+            severity,      # p_severity
+            description,   # p_description
+            state,         # Fault | Recovery
+            device_time,   # p_device_time
+        )
+    )
+
     conn.commit()
     cur.close()
     conn.close()
 
-    print(f"[+] Trap received from {sender_ip}")
+    print(f"[+] {state} alarm from {sender_ip}")
 
+# =========================================================
+# START RECEIVER
+# =========================================================
 
-# Register trap receiver
 ntfrcv.NotificationReceiver(snmpEngine, cbFun)
 
 print(f"Listening for SNMP traps on {LISTEN_IP}:{LISTEN_PORT}")
 
-
-# -------------------------
-# START DISPATCHER
-# -------------------------
-
-try:
-    snmpEngine.transportDispatcher.jobStarted(1)
-    snmpEngine.transportDispatcher.runDispatcher()
-except KeyboardInterrupt:
-    print("\nStopping trap receiver...")
-    snmpEngine.transportDispatcher.closeDispatcher()
+snmpEngine.transportDispatcher.jobStarted(1)
+snmpEngine.transportDispatcher.runDispatcher()
