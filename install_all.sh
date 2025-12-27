@@ -2,22 +2,6 @@
 set -euo pipefail
 
 #######################################
-# CONFIG
-#######################################
-APP_DIR="/opt/snmp_alarm_system"
-VENV_DIR="${APP_DIR}/venv"
-
-PYTHON_REQUIRED="3.11"
-
-DB_NAME="snmptraps"
-DB_USER="snmpuser"
-DB_PASS="toor"
-
-SERVICE_NAME="snmp-trap-receiver"
-
-BASE_URL="https://raw.githubusercontent.com/mizan23/snmp_huawei_NTTN/main"
-
-#######################################
 # ROOT CHECK
 #######################################
 if [[ $EUID -ne 0 ]]; then
@@ -25,7 +9,35 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "🚀 Installing SNMP Alarm System (FINAL HARDENED FIX)"
+echo "🚀 Installing SNMP Alarm System (FULL FIX)"
+
+#######################################
+# INTERACTIVE DB CONFIG
+#######################################
+read -rp "Enter PostgreSQL database name [snmptraps]: " DB_NAME
+DB_NAME=${DB_NAME:-snmptraps}
+
+read -rp "Enter PostgreSQL user [snmpuser]: " DB_USER
+DB_USER=${DB_USER:-snmpuser}
+
+read -srp "Enter PostgreSQL password: " DB_PASS
+echo ""
+read -srp "Confirm PostgreSQL password: " DB_PASS_CONFIRM
+echo ""
+
+if [[ "$DB_PASS" != "$DB_PASS_CONFIRM" ]]; then
+  echo "❌ Passwords do not match"
+  exit 1
+fi
+
+#######################################
+# CONFIG
+#######################################
+APP_DIR="/opt/snmp_alarm_system"
+VENV_DIR="${APP_DIR}/venv"
+SERVICE_NAME="snmp-trap-receiver"
+BASE_URL="https://raw.githubusercontent.com/mizan23/snmp_huawei_NTTN/main"
+PYTHON_REQUIRED="3.11"
 
 #######################################
 # OS DEPENDENCIES
@@ -54,7 +66,7 @@ EOF
 )
 
 if [[ "$PY_VER" != "$PYTHON_REQUIRED" ]]; then
-  echo "❌ Python 3.11 required, found ${PY_VER}"
+  echo "❌ Python 3.11 required"
   exit 1
 fi
 
@@ -65,22 +77,30 @@ systemctl enable postgresql
 systemctl start postgresql
 
 #######################################
-# DATABASE & USER
+# DATABASE & USER (SAFE + IDEMPOTENT)
 #######################################
-sudo -u postgres psql -tAc \
-  "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" \
-  | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME};"
+sudo -u postgres psql <<EOF
+DO \$\$
+BEGIN
+  IF NOT EXISTS (
+    SELECT FROM pg_database WHERE datname='${DB_NAME}'
+  ) THEN
+    CREATE DATABASE ${DB_NAME};
+  END IF;
 
-sudo -u postgres psql -tAc \
-  "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" \
-  | grep -q 1 || sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';"
-
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};"
+  IF NOT EXISTS (
+    SELECT FROM pg_roles WHERE rolname='${DB_USER}'
+  ) THEN
+    CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';
+  END IF;
+END
+\$\$;
+EOF
 
 #######################################
 # SCHEMA & CORE LOGIC
 #######################################
-sudo -u postgres psql -d ${DB_NAME} <<'EOF'
+sudo -u postgres psql -d "${DB_NAME}" <<'EOF'
 CREATE TABLE IF NOT EXISTS traps (
     id BIGSERIAL PRIMARY KEY,
     received_at TIMESTAMP NOT NULL,
@@ -173,21 +193,43 @@ $$ LANGUAGE plpgsql;
 EOF
 
 #######################################
+# DATABASE PERMISSIONS (STORE & VIEW)
+#######################################
+sudo -u postgres psql -d "${DB_NAME}" <<EOF
+GRANT USAGE ON SCHEMA public TO ${DB_USER};
+
+GRANT SELECT, INSERT ON traps TO ${DB_USER};
+GRANT SELECT, INSERT, UPDATE, DELETE ON active_alarms TO ${DB_USER};
+GRANT SELECT, INSERT ON historical_alarms TO ${DB_USER};
+
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER};
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${DB_USER};
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT USAGE, SELECT ON SEQUENCES TO ${DB_USER};
+EOF
+
+#######################################
+# DB CONNECTION TEST
+#######################################
+PGPASSWORD="${DB_PASS}" psql \
+  -U "${DB_USER}" \
+  -d "${DB_NAME}" \
+  -c "SELECT now();" >/dev/null
+
+echo "✅ Database access verified"
+
+#######################################
 # APPLICATION DIRECTORY
 #######################################
 mkdir -p "${APP_DIR}"
 
 #######################################
-# DESTROY OLD VENV (CRITICAL)
+# CLEAN VENV
 #######################################
-if [[ -d "${VENV_DIR}" ]]; then
-  echo "⚠️ Removing existing virtualenv"
-  rm -rf "${VENV_DIR}"
-fi
-
-#######################################
-# CREATE PYTHON 3.11 VENV
-#######################################
+rm -rf "${VENV_DIR}"
 python3.11 -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
 
@@ -221,6 +263,9 @@ Restart=always
 RestartSec=5
 User=root
 Environment=PYTHONUNBUFFERED=1
+Environment=DB_NAME=${DB_NAME}
+Environment=DB_USER=${DB_USER}
+Environment=DB_PASS=${DB_PASS}
 
 [Install]
 WantedBy=multi-user.target
@@ -235,13 +280,13 @@ systemctl restart ${SERVICE_NAME}
 # DONE
 #######################################
 echo ""
-echo "🎉 INSTALLATION COMPLETE — GUARANTEED FIX"
-echo "----------------------------------------"
+echo "🎉 INSTALLATION COMPLETE — FULL FIX"
+echo "----------------------------------"
+echo "✔ DB variables prompted securely"
+echo "✔ DB user can STORE and VIEW traps"
 echo "✔ Python 3.11 enforced"
-echo "✔ Virtualenv recreated"
-echo "✔ pysnmp + pyasn1 pinned"
 echo "✔ PostgreSQL schema ready"
 echo "✔ SNMP trap receiver running"
 echo ""
-echo "Check:"
+echo "Check status:"
 echo "  systemctl status ${SERVICE_NAME}"
