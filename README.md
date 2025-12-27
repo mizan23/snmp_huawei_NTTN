@@ -1,14 +1,16 @@
-# Huawei SNMPv3 Alarm Management System (pysnmp + PostgreSQL)
+# Huawei SNMPv3 Alarm Management System  
+*(pysnmp + PostgreSQL)*
 
 This project provides a **production-ready SNMPv3 alarm management system**
 compatible with **Huawei iMaster NCE**.
 
 It includes:
+
 - SNMPv3 trap receiver
 - Active → historical alarm lifecycle
 - PostgreSQL backend
 - Human-readable CLI (`active` / `history`)
-- Tested with Huawei SHA-256 + AES-128 (AuthPriv)
+- Tested with Huawei **SHA-256 + AES-128 (AuthPriv)**
 
 ---
 
@@ -20,7 +22,9 @@ It includes:
 ├── alarm_processor.py        # Moves recovered alarms to history
 ├── cli_user.py               # CLI: view active & historical alarms
 └── README.md
-✅ STEP-BY-STEP DEPLOYMENT (FOLLOW IN ORDER)
+✅ STEP-BY-STEP DEPLOYMENT
+(Follow in order)
+
 🔹 STEP 1 — Install System Requirements
 bash
 Copy code
@@ -32,6 +36,8 @@ sudo apt install -y \
   postgresql \
   postgresql-contrib
 🔹 STEP 2 — Create PostgreSQL Database
+Enter PostgreSQL shell:
+
 bash
 Copy code
 sudo -u postgres psql
@@ -130,14 +136,14 @@ AUTH_KEY  = "Fiber@Dwdm@9800"
 PRIV_KEY  = "Fiber@Dwdm@9800"
 
 HUAWEI_ENGINE_ID = b"\x80\x00\x13\x70\x01\xc0\xa8\x2a\x05"
-These must exactly match Huawei iMaster NCE.
+⚠️ These values must exactly match Huawei iMaster NCE.
 
 🔹 STEP 7 — Start SNMP Trap Receiver
 bash
 Copy code
 chmod +x pysnmp_trap_receiver.py
 sudo ./pysnmp_trap_receiver.py
-Expected:
+Expected output:
 
 text
 Copy code
@@ -196,4 +202,3 @@ Rows should appear ✅
 ✔ CLI monitoring
 ✔ GitHub-ready
 ✔ Enterprise-grade design
-
