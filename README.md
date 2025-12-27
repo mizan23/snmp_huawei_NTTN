@@ -281,7 +281,3 @@ PostgreSQL acts as the **alarm brain**.
 ✔ Enterprise-grade NMS design  
 
 ---
-
-## 📜 License
-
-MIT
