@@ -15,7 +15,7 @@ GRAFANA_PASS="toor"
 # CHECK ROOT
 # ================================
 if [[ $EUID -ne 0 ]]; then
-  echo "❌ Please run as root: sudo ./setup_postgres.sh"
+  echo "❌ Please run as root: sudo ./setup_postgresql.sh"
   exit 1
 fi
 
@@ -70,10 +70,13 @@ GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
 EOF
 
 # ================================
-# CREATE SCHEMA
+# CREATE SCHEMA, TABLES, FUNCTION
 # ================================
 sudo -u postgres psql -d ${DB_NAME} <<EOF
 
+-- -------------------------------
+-- TABLES
+-- -------------------------------
 CREATE TABLE IF NOT EXISTS traps (
     id BIGSERIAL PRIMARY KEY,
     received_at TIMESTAMP NOT NULL,
@@ -112,9 +115,9 @@ CREATE TABLE IF NOT EXISTS historical_alarms (
     device_time TEXT
 );
 
--- ================================
+-- -------------------------------
 -- ALARM LIFECYCLE FUNCTION
--- ================================
+-- -------------------------------
 CREATE OR REPLACE FUNCTION process_alarm_row(
     p_received_at TIMESTAMP,
     p_site TEXT,
@@ -167,9 +170,36 @@ BEGIN
 END;
 \$\$ LANGUAGE plpgsql;
 
+-- ================================
+-- PERMISSIONS (CRITICAL FIX)
+-- ================================
+
+-- Allow schema usage
+GRANT USAGE ON SCHEMA public TO ${DB_USER};
+
+-- Table privileges
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON ALL TABLES IN SCHEMA public
+TO ${DB_USER};
+
+-- Function execution
+GRANT EXECUTE
+ON ALL FUNCTIONS IN SCHEMA public
+TO ${DB_USER};
+
+-- Default privileges for future objects
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON TABLES TO ${DB_USER};
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT EXECUTE
+ON FUNCTIONS TO ${DB_USER};
+
 EOF
 
 echo "🎉 PostgreSQL setup COMPLETE"
 echo "➡ Database      : ${DB_NAME}"
 echo "➡ App user      : ${DB_USER}"
 echo "➡ Grafana user  : ${GRAFANA_USER}"
+echo "➡ Permissions   : FULL (tables + functions)"
