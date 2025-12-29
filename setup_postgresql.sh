@@ -19,7 +19,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "✅ Running PostgreSQL automatic setup..."
+echo "✅ Running PostgreSQL automatic setup (FINAL)"
 
 # ================================
 # INSTALL POSTGRESQL IF NEEDED
@@ -66,17 +66,17 @@ BEGIN
 END
 \$\$;
 
-GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
+GRANT CONNECT ON DATABASE ${DB_NAME} TO ${DB_USER};
 EOF
 
 # ================================
-# CREATE SCHEMA, TABLES, FUNCTION
+# SCHEMA, TABLES, FUNCTION, PERMS
 # ================================
 sudo -u postgres psql -d ${DB_NAME} <<EOF
 
--- -------------------------------
+-- ================================
 -- TABLES
--- -------------------------------
+-- ================================
 CREATE TABLE IF NOT EXISTS traps (
     id BIGSERIAL PRIMARY KEY,
     received_at TIMESTAMP NOT NULL,
@@ -115,9 +115,9 @@ CREATE TABLE IF NOT EXISTS historical_alarms (
     device_time TEXT
 );
 
--- -------------------------------
+-- ================================
 -- ALARM LIFECYCLE FUNCTION
--- -------------------------------
+-- ================================
 CREATE OR REPLACE FUNCTION process_alarm_row(
     p_received_at TIMESTAMP,
     p_site TEXT,
@@ -145,8 +145,8 @@ BEGIN
         )
         ON CONFLICT (site, device_type, source, alarm_code)
         DO UPDATE SET
-            last_seen = EXCLUDED.last_seen,
-            severity  = EXCLUDED.severity,
+            last_seen   = EXCLUDED.last_seen,
+            severity    = EXCLUDED.severity,
             description = EXCLUDED.description;
     END IF;
 
@@ -171,10 +171,10 @@ END;
 \$\$ LANGUAGE plpgsql;
 
 -- ================================
--- PERMISSIONS (CRITICAL FIX)
+-- PERMISSIONS (FULL & CORRECT)
 -- ================================
 
--- Allow schema usage
+-- Schema access
 GRANT USAGE ON SCHEMA public TO ${DB_USER};
 
 -- Table privileges
@@ -187,6 +187,11 @@ GRANT EXECUTE
 ON ALL FUNCTIONS IN SCHEMA public
 TO ${DB_USER};
 
+-- Sequence privileges (CRITICAL FIX)
+GRANT USAGE, SELECT
+ON ALL SEQUENCES IN SCHEMA public
+TO ${DB_USER};
+
 -- Default privileges for future objects
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
 GRANT SELECT, INSERT, UPDATE, DELETE
@@ -196,10 +201,14 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 GRANT EXECUTE
 ON FUNCTIONS TO ${DB_USER};
 
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT USAGE, SELECT
+ON SEQUENCES TO ${DB_USER};
+
 EOF
 
-echo "🎉 PostgreSQL setup COMPLETE"
+echo "🎉 PostgreSQL setup COMPLETE (FINAL)"
 echo "➡ Database      : ${DB_NAME}"
 echo "➡ App user      : ${DB_USER}"
 echo "➡ Grafana user  : ${GRAFANA_USER}"
-echo "➡ Permissions   : FULL (tables + functions)"
+echo "➡ Permissions   : FULL (tables + functions + sequences)"
