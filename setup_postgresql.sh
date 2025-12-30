@@ -15,11 +15,11 @@ GRAFANA_PASS="toor"
 # CHECK ROOT
 # ================================
 if [[ $EUID -ne 0 ]]; then
-  echo "❌ Please run as root: sudo ./setup_postgres.sh"
+  echo "❌ Please run as root: sudo ./setup_postgresql.sh"
   exit 1
 fi
 
-echo "✅ Running PostgreSQL automatic setup..."
+echo "✅ Running PostgreSQL automatic setup (FINAL)"
 
 # ================================
 # INSTALL POSTGRESQL IF NEEDED
@@ -39,17 +39,17 @@ systemctl enable postgresql
 systemctl start postgresql
 
 # ================================
-# CREATE DATABASE & USERS
+# CREATE DATABASE (OUTSIDE DO — CRITICAL FIX)
+# ================================
+echo "📂 Ensuring database exists"
+sudo -u postgres psql -tc \
+  "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || \
+sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME};"
+
+# ================================
+# CREATE USERS (DO BLOCKS OK)
 # ================================
 sudo -u postgres psql <<EOF
-DO \$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}') THEN
-      CREATE DATABASE ${DB_NAME};
-   END IF;
-END
-\$\$;
-
 DO \$\$
 BEGIN
    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${DB_USER}') THEN
@@ -66,14 +66,18 @@ BEGIN
 END
 \$\$;
 
-GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
+GRANT CONNECT ON DATABASE ${DB_NAME} TO ${DB_USER};
+GRANT CONNECT ON DATABASE ${DB_NAME} TO ${GRAFANA_USER};
 EOF
 
 # ================================
-# CREATE SCHEMA
+# SCHEMA, TABLES, FUNCTION, PERMS
 # ================================
 sudo -u postgres psql -d ${DB_NAME} <<EOF
 
+-- ================================
+-- TABLES
+-- ================================
 CREATE TABLE IF NOT EXISTS traps (
     id BIGSERIAL PRIMARY KEY,
     received_at TIMESTAMP NOT NULL,
@@ -142,8 +146,8 @@ BEGIN
         )
         ON CONFLICT (site, device_type, source, alarm_code)
         DO UPDATE SET
-            last_seen = EXCLUDED.last_seen,
-            severity  = EXCLUDED.severity,
+            last_seen   = EXCLUDED.last_seen,
+            severity    = EXCLUDED.severity,
             description = EXCLUDED.description;
     END IF;
 
@@ -167,9 +171,39 @@ BEGIN
 END;
 \$\$ LANGUAGE plpgsql;
 
+-- ================================
+-- PERMISSIONS (CORRECT & COMPLETE)
+-- ================================
+GRANT USAGE ON SCHEMA public TO ${DB_USER};
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON ALL TABLES IN SCHEMA public
+TO ${DB_USER};
+
+GRANT EXECUTE
+ON ALL FUNCTIONS IN SCHEMA public
+TO ${DB_USER};
+
+GRANT USAGE, SELECT
+ON ALL SEQUENCES IN SCHEMA public
+TO ${DB_USER};
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON TABLES TO ${DB_USER};
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT EXECUTE
+ON FUNCTIONS TO ${DB_USER};
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT USAGE, SELECT
+ON SEQUENCES TO ${DB_USER};
+
 EOF
 
-echo "🎉 PostgreSQL setup COMPLETE"
+echo "🎉 PostgreSQL setup COMPLETE (FINAL & FIXED)"
 echo "➡ Database      : ${DB_NAME}"
 echo "➡ App user      : ${DB_USER}"
 echo "➡ Grafana user  : ${GRAFANA_USER}"
+echo "➡ Permissions   : FULL"
