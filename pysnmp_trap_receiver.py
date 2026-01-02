@@ -1,9 +1,10 @@
 #!/opt/pysnmp-venv/bin/python
 # ==========================================================
-# SNMP Trap Receiver with Alarm Lifecycle (PRODUCTION FIXED)
+# SNMP Trap Receiver with Alarm Lifecycle (HEX SAFE FIXED)
 # ==========================================================
 
 import json
+import binascii
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import psycopg2
@@ -37,7 +38,7 @@ HUAWEI_ENGINE_ID = b"\x80\x00\x13\x70\x01\xc0\xa8\x2a\x05"
 
 
 # ==========================================================
-# SNMP ENGINE SETUP (FIXED)
+# SNMP ENGINE SETUP
 # ==========================================================
 
 snmpEngine = engine.SnmpEngine()
@@ -52,7 +53,6 @@ config.addV3User(
     securityEngineId=HUAWEI_ENGINE_ID
 )
 
-# ✅ REQUIRED FOR AUTHPRIV
 config.addTargetParams(
     snmpEngine,
     "trap-creds",
@@ -97,6 +97,30 @@ def is_snmp_agent_trap(vars_list):
     return False
 
 
+def decode_hex_description(val):
+    """
+    Decode Huawei-style hex OCTET STRING safely.
+    Leaves binary or invalid data untouched.
+    """
+    if not val or not isinstance(val, str):
+        return val
+
+    if val.startswith("0x"):
+        hex_part = val[2:]
+
+        # must be valid hex
+        if len(hex_part) % 2 != 0:
+            return val
+
+        try:
+            decoded = binascii.unhexlify(hex_part)
+            return decoded.decode("utf-8", errors="replace")
+        except Exception:
+            return val
+
+    return val
+
+
 # ==========================================================
 # TRAP CALLBACK
 # ==========================================================
@@ -117,11 +141,13 @@ def cbFun(snmpEngine, stateRef, contextEngineId, contextName, varBinds, cbCtx):
     site        = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.1.0")
     device_type = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.2.0")
     source      = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.3.0")
-    description = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.6.0")
+    alarm_code  = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.24.0")
     severity    = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.7.0")
     raw_state   = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.10.0")
-    alarm_code  = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.24.0")
     device_time = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.5.0")
+
+    raw_description = get_value(vars_list, "1.3.6.1.4.1.2011.2.15.1.7.1.6.0")
+    description = decode_hex_description(raw_description)
 
     state = normalize_state(raw_state)
 
@@ -129,7 +155,7 @@ def cbFun(snmpEngine, stateRef, contextEngineId, contextName, varBinds, cbCtx):
     cur = conn.cursor()
 
     try:
-        # Store raw trap
+        # Store raw trap (unaltered)
         cur.execute("""
             INSERT INTO traps (received_at, sender, raw, parsed)
             VALUES (%s, %s, %s, %s)
@@ -140,7 +166,7 @@ def cbFun(snmpEngine, stateRef, contextEngineId, contextName, varBinds, cbCtx):
             json.dumps(vars_list),
         ))
 
-        # Alarm lifecycle (SAFE + CASTED)
+        # Alarm lifecycle
         if all([site, device_type, source, alarm_code, state]):
             cur.execute("""
                 SELECT process_alarm_row(
