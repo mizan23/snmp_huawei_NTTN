@@ -1,283 +1,179 @@
-# 📘 SNMP Alarm Management System
-**Active & Historical Alarm Handling using pysnmp + PostgreSQL**
+# SNMP Trap Receiver with PostgreSQL Alarm Lifecycle
 
-Enterprise-grade SNMPv3 alarm ingestion and lifecycle management system designed for Huawei NCE / telecom environments.
-
----
-
-## 🚀 Overview
-
-This project implements a **telecom-grade SNMP alarm management system** with:
-
-- SNMPv3 trap reception (Huawei compatible)
-- PostgreSQL-backed alarm lifecycle engine (**raw → active → history**)
-- Separation of **Active** and **Historical (Recovered)** alarms
-- Operator-friendly CLI viewer
-- Grafana-ready database schema
-
-You can deploy this system in **two ways**:
-1. **Automatic (recommended)** – one command, fully automated  
-2. **Manual** – step-by-step, full control  
+A production-ready **SNMPv3 trap receiver** written in Python, backed by **PostgreSQL-native alarm lifecycle management**.
+This project captures SNMP traps, safely decodes vendor payloads (Huawei-friendly), and maintains **ACTIVE / HISTORICAL**
+alarms directly inside PostgreSQL.
 
 ---
 
-## 🧠 Architecture
+## Features
 
-```text
-Network Devices (SNMPv3)
-        |
-        v
-pysnmp_trap_receiver.py
-        |
-        v
-PostgreSQL (Alarm Engine)
-├── traps              (raw traps / audit)
-├── active_alarms      (currently active alarms)
-├── historical_alarms  (cleared alarms)
-└── process_alarm_row  (core lifecycle logic)
-        |
-        +── cli_user.py
-        +── Grafana
+- SNMPv3 (authPriv) trap reception using `pysnmp`
+- Safe HEX OCTET STRING decoding (Huawei alarms)
+- PostgreSQL-driven alarm state machine
+- ACTIVE / CLEARED alarm lifecycle
+- Stateless Python receiver (DB is source of truth)
+- Grafana-ready schema
+- One-command bootstrap scripts
+
+---
+
+## Repository Structure
+
+```
+.
+├── bootstrap_snmp_python310.sh   # Python 3.10 + virtualenv + SNMP deps
+├── setup_postgresql.sh           # PostgreSQL schema, users, alarm logic
+├── pysnmp_trap_receiver.py       # SNMP trap listener (core app)
+├── postgre_sql_snmp_alarm_database.md
+└── README.md
 ```
 
 ---
 
-## 🛠 Requirements
+## Architecture
+
+```
+Network Device
+   ↓ SNMP Trap (v3)
+Python Trap Receiver
+   ↓
+INSERT INTO traps
+   ↓
+process_alarm_row()
+   ↓
+PostgreSQL
+   ├── active_alarms
+   └── historical_alarms
+```
+
+All alarm lifecycle logic is enforced inside PostgreSQL, ensuring transactional safety and eliminating duplicate active alarms.
+
+---
+
+## Requirements
 
 - Ubuntu 20.04 / 22.04 / 24.04
-- Root access (`sudo`)
-- Internet connectivity
-- Huawei devices sending **SNMPv3 AuthPriv traps**
+- sudo/root access
+- SNMPv3-capable network devices
 
 ---
 
-# ⚡ OPTION A — Automatic Installation (RECOMMENDED)
+## Quick Start
 
-This method installs **everything automatically**:
-
-✔ OS dependencies  
-✔ Python 3.10 + virtual environment  
-✔ pysnmp + psycopg2  
-✔ PostgreSQL installation & configuration  
-✔ Raw / Active / History tables  
-✔ Alarm lifecycle function  
-✔ Trap receiver deployment  
-✔ CLI viewer deployment  
-
-### ▶ One command install
+### 1. Install Python 3.10 and Dependencies
 
 ```bash
-chmod +x install_all.sh
-sudo ./install_all.sh
+chmod +x bootstrap_snmp_python310.sh
+./bootstrap_snmp_python310.sh
 ```
 
-After completion, the system is **fully operational**.
+This installs Python **3.10.14**, creates a virtual environment, and installs pinned SNMP/PostgreSQL libraries.
 
 ---
 
-# 🛠 OPTION B — Manual Installation (STEP-BY-STEP)
+### 2. Install and Configure PostgreSQL
 
-Use this if you want **full visibility and control**.
+```bash
+sudo chmod +x setup_postgresql.sh
+sudo ./setup_postgresql.sh
+```
+
+Creates:
+- Database: `snmptraps`
+- User: `snmpuser`
+- Grafana user: `grafana_user`
+- Tables, indexes, and alarm lifecycle function
 
 ---
 
-## 1️⃣ Install Required Software
+### 3. Configure Trap Receiver
 
-```bash
-sudo apt update
-sudo apt install -y python3-pip postgresql postgresql-contrib python3.10 python3.10-venv
-```
+Edit connection and SNMP parameters in `pysnmp_trap_receiver.py`:
 
----
+```python
+LISTEN_IP = "0.0.0.0"
+LISTEN_PORT = 8899
 
-## 2️⃣ Create Python Virtual Environment
-
-```bash
-python3.10 -m venv /opt/pysnmp-env
-source /opt/pysnmp-env/bin/activate
-```
-
-```text
-(pysnmp-env)
-```
-
-Install libraries:
-
-```bash
-pip install --upgrade pip
-pip install pysnmp==4.4.12 psycopg2-binary
+DB_CONFIG = {
+    "host": "localhost",
+    "dbname": "snmptraps",
+    "user": "snmpuser",
+    "password": "toor",
+}
 ```
 
 ---
 
-## 3️⃣ PostgreSQL Setup (MANUAL)
+### 4. Run the Trap Receiver
 
 ```bash
-sudo -u postgres psql
+source ~/venv/bin/activate
+python pysnmp_trap_receiver.py
 ```
+
+Example output:
+
+```
+Listening for SNMP traps on 0.0.0.0:8899
+[OK] Fault | LINK_DOWN | SITE-A
+[OK] Recovery | LINK_DOWN | SITE-A
+```
+
+---
+
+## Database Model
+
+### Tables
+
+| Table | Description |
+|------|-------------|
+| traps | Raw SNMP trap storage |
+| active_alarms | Currently active alarms |
+| historical_alarms | Cleared alarm history |
+
+### Alarm Logic
+
+Alarm transitions are handled by the PostgreSQL function:
 
 ```sql
-CREATE DATABASE snmptraps;
-
-CREATE USER snmpuser WITH PASSWORD 'toor';
-CREATE USER grafana_user WITH PASSWORD 'toor';
-
-GRANT ALL PRIVILEGES ON DATABASE snmptraps TO snmpuser;
-\q
+process_alarm_row(...)
 ```
 
-### Create tables & core logic
-
-```bash
-sudo -u postgres psql -d snmptraps
-```
-
-```sql
--- Raw traps
-CREATE TABLE traps (
-    id BIGSERIAL PRIMARY KEY,
-    received_at TIMESTAMP NOT NULL,
-    sender TEXT,
-    raw JSONB,
-    parsed JSONB
-);
-
--- Active alarms
-CREATE TABLE active_alarms (
-    alarm_id BIGSERIAL PRIMARY KEY,
-    first_seen TIMESTAMP NOT NULL,
-    last_seen TIMESTAMP NOT NULL,
-    site TEXT,
-    device_type TEXT,
-    source TEXT,
-    alarm_code TEXT,
-    severity TEXT,
-    description TEXT,
-    device_time TEXT
-);
-
-CREATE UNIQUE INDEX uq_active_alarm
-ON active_alarms (site, device_type, source, alarm_code);
-
--- Historical alarms
-CREATE TABLE historical_alarms (
-    alarm_id BIGINT,
-    first_seen TIMESTAMP NOT NULL,
-    last_seen TIMESTAMP NOT NULL,
-    recovery_time TIMESTAMP NOT NULL,
-    site TEXT,
-    device_type TEXT,
-    source TEXT,
-    alarm_code TEXT,
-    severity TEXT,
-    description TEXT,
-    device_time TEXT
-);
-
--- Core lifecycle function
-CREATE OR REPLACE FUNCTION process_alarm_row(
-    p_received_at TIMESTAMP,
-    p_site TEXT,
-    p_device_type TEXT,
-    p_source TEXT,
-    p_alarm_code TEXT,
-    p_severity TEXT,
-    p_description TEXT,
-    p_state TEXT,
-    p_device_time TEXT
-) RETURNS VOID AS $$
-BEGIN
-    IF p_state = 'Fault' THEN
-        INSERT INTO active_alarms (
-            first_seen, last_seen,
-            site, device_type, source,
-            alarm_code, severity,
-            description, device_time
-        )
-        VALUES (
-            p_received_at, p_received_at,
-            p_site, p_device_type, p_source,
-            p_alarm_code, p_severity,
-            p_description, p_device_time
-        )
-        ON CONFLICT (site, device_type, source, alarm_code)
-        DO UPDATE SET
-            last_seen = EXCLUDED.last_seen,
-            severity  = EXCLUDED.severity,
-            description = EXCLUDED.description;
-    END IF;
-
-    IF p_state = 'Recovery' THEN
-        INSERT INTO historical_alarms
-        SELECT alarm_id, first_seen, last_seen, p_received_at,
-               site, device_type, source,
-               alarm_code, severity, description, device_time
-        FROM active_alarms
-        WHERE site = p_site
-          AND device_type = p_device_type
-          AND source = p_source
-          AND alarm_code = p_alarm_code;
-
-        DELETE FROM active_alarms
-        WHERE site = p_site
-          AND device_type = p_device_type
-          AND source = p_source
-          AND alarm_code = p_alarm_code;
-    END IF;
-END;
-$$ LANGUAGE plpgsql;
-```
+- `Fault` → insert/update `active_alarms`
+- `Recovery` → move alarm to `historical_alarms`
 
 ---
 
-## 4️⃣ Deploy Python Applications (MANUAL)
+## Grafana Integration
 
-```bash
-mkdir -p /opt/snmp_alarm_system
-cp pysnmp_trap_receiver.py /opt/snmp_alarm_system/
-cp cli_user.py /opt/snmp_alarm_system/
+Use the `grafana_user` to create dashboards directly from:
 
-chmod +x /opt/snmp_alarm_system/*.py
-```
+- `active_alarms` (live alarms)
+- `historical_alarms` (SLA, MTTR, reporting)
 
----
-
-## ▶ Running the System
-
-### Start SNMP Trap Receiver
-
-```bash
-sudo /opt/snmp_alarm_system/pysnmp_trap_receiver.py
-```
-
-### CLI Usage
-
-```bash
-/opt/snmp_alarm_system/cli_user.py active
-/opt/snmp_alarm_system/cli_user.py history
-```
+No middleware required.
 
 ---
 
-## 🧠 Alarm Lifecycle Summary
+## Security Notes
 
-| State | Result |
-|-----|-------|
-| Fault | Insert/update active alarm |
-| Repeat Fault | Update last_seen |
-| Recovery | Move to history |
-| Recovery | Remove from active |
-
-PostgreSQL acts as the **alarm brain**.
+- SNMPv3 `authPriv` enforced
+- SCRAM-SHA-256 PostgreSQL authentication
+- Alarm tables are not written directly by applications
 
 ---
 
-## ✅ Final Result
+## License
 
-✔ Raw traps preserved  
-✔ Active alarms deduplicated  
-✔ Recoveries archived automatically  
-✔ Manual or automatic install supported  
-✔ Enterprise-grade NMS design  
+Intended for internal, lab, or educational use.
+Modify and extend freely.
 
 ---
+
+## Status
+
+- Production tested
+- Idempotent setup scripts
+- Stateless receiver
+- Database-enforced alarm lifecycle
