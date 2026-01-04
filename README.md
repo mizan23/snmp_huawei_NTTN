@@ -99,7 +99,7 @@ DB_CONFIG = {
     "host": "localhost",
     "dbname": "snmptraps",
     "user": "snmpuser",
-    "password": "toor",
+    "password": "your_password",
 }
 ```
 
